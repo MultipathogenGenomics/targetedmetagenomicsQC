@@ -1,8 +1,7 @@
 # QC Pipeline (`qcpipe_integrated.py`)
 
 ## Summary
-
-`qcpipe_integrated.py` is an integrated quality control (QC) pipeline for targeted next-generation sequencing (tNGS) data. It performs end-to-end QC across FASTQ reads, BAM alignments, enrichment regions, insert size distributions, taxonomic classification, and optional Castanet outputs.
+`qcpipe_integrated.py` is an integrated quality control (QC) pipeline for targeted next-generation sequencing (tNGS) data. It performs end-to-end QC across FASTQ reads, BAM alignments, enrichment regions, insert size distributions, taxonomic classification, and optional [Castanet](https://github.com/MultipathogenGenomics/castanet) outputs.
 
 It generates a **single per-sample QC report (`*_qc.csv`)** and optional diagnostic plots.
 
@@ -13,7 +12,7 @@ It generates a **single per-sample QC report (`*_qc.csv`)** and optional diagnos
 - Insert size distribution analysis from BAM files
 - Enrichment analysis using BED-defined regions, usually in mitochondrial regions
 - Kraken2 taxonomic summarisation
-- Castanet BAM + depth integration
+- [Castanet](https://github.com/MultipathogenGenomics/castanet) BAM + depth integration
 - Insert size visualisation plots
 
 ---
