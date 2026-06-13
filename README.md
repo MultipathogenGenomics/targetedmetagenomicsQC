@@ -19,11 +19,9 @@ It generates a **single per-sample QC report (`*_qc.csv`)** and optional diagnos
 
 ## Dependencies
 
-The runtime environment must contain the following command-line tools and software utilities within its execution `$PATH`:
-
-* **`bwa-mem2`**: High-performance alignment framework.
-* **`samtools` ($\\ge$ v1.10)**: Stream processing engine for SAM/BAM operations (`sort`, `index`, `depth`, `view`).
-* **`seqkit`**: Fast sequential processing of nucleotide records.
+* **`bwa-mem2`**
+* **`samtools` ($\\ge$ v1.10)**
+* **`seqkit`**
 * ** Python 3.x Environment**: Requires `pandas`, `numpy`, and `matplotlib`.
 
 ---
