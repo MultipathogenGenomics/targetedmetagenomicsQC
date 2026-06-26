@@ -1,3 +1,4 @@
+import shutil
 import sys
 import statistics
 import os
@@ -237,6 +238,9 @@ def get_args():
     parser.add_argument("--bedfile", help="bed file of enriched, unenriched and avoided regions",required=False)
     parser.add_argument("-o","--outdir", help="output directory",required=True)
     parser.add_argument("--keeptmp", help="keep temporary files",action="store_true",default=False)
+    parser.add_argument("--humantargets",help="fasta file of human targets included in capture panel",default=False)
+    parser.add_argument("--humanmappref",help="castanet mapping reference table for human targets ",default=False)
+    parser.add_argument("--threads", help="number of threads to use", default=1)
     args = parser.parse_args()
     return args
 
@@ -351,10 +355,34 @@ def get_castanet_stats(depthfile):
     dedup_reads = depthdata["n_reads_dedup"].sum()
     return total_reads,dedup_reads
 
+def run_castanet(sample,outdir,trimmed,humantargets,threads,mapref):
+    trimmedfolder = os.path.dirname(trimmed[0])
+    if len(glob(trimmedfolder + "/" + "*")) != 2:
+        sys.exit("to perform humantargets analysis with castanet reads must be in one folder per sample")
+    castanetcmd= f"""python3 -m app.castanet_lite -ExpName {sample} -ExpDir {trimmedfolder} -SaveDir {outdir} -RefStem {humantargets} -DoKrakenPrefilter False -KrakenDbDir "" -DoConsensus False -DoTrimming False -NThreads {threads} -PostFilt False -MappingRefTable {mapref}
+    """
+    res = subprocess.run(castanetcmd, shell=True, capture_output=True, text=True)
+    if res.returncode != 0:
+        print(f"Error running castanet: \nSTDOUT\n\n{res.stdout}\n\n\nSTDERR\n{res.stderr}")
+        sys.exit(1)
+    outdepth = outdir + "/" + sample + "/" + sample + "_depth.csv"
+    depthplots = outdir + "/" + sample + "/Depth_output"
+    if os.path.exists(outdepth):
+        if not os.path.exists(outdir+"/plots"):
+            os.mkdir(outdir+"/plots")
+        for depthfile in glob(depthplots + "/human*"):
+            shutil.copy(depthfile, outdir + "/plots/")
+        return outdepth
+    else:
+        print(f"expected output depth file, {outdepth} was not found, check castanet outputs below: \nSTDOUT\n\n{res.stdout}\n\n\nSTDERR\n{res.stderr}")
+        sys.exit(1)
+
+
 def main():
 
     args = get_args()
-
+    if not os.path.exists(args.outdir):
+        os.mkdir(args.outdir)
     outfile = args.outdir + "/" + args.sample + "_qc.csv"
     outf = open(outfile, "w")
     outstring = f"{args.batch},{args.sample}"
@@ -385,7 +413,9 @@ def main():
     outstring += f",{args.raw[0]},{args.raw[1]},{args.trimmed[0]},{args.trimmed[1]},{lenrawbothlengths},{lenbothlens},{avg_len},{median_len},{r1count},{r2count},{r1avg},{r1median},{r2avg},{r2median}"
 
 
-    if args.trimmed[0] != "NA" and args.mttarget:
+    if args.trimmed[0] != "NA" and args.mttarget and args.bedfile:
+        if not os.path.exists(args.mttarget) or not os.path.exists(args.bedfile):
+            sys.exit("Please provide either args.bedfile and args.mttarget to perform enrichment analysis")
         mtbam = args.outdir + "/" + args.sample + ".mt_bwa.bam"
         run_bwa_mt(args.trimmed[0],args.trimmed[1],args.mttarget,args.outdir+"/"+args.sample+".mt_bwa.bam")
         print("BWA mapping done")
@@ -425,6 +455,53 @@ def main():
     else:
         outstring += f",NA,NA,NA,NA"
         outheader += f",enrichedMedian,unenrichedMedian,enrichmentRatio,enrichmentloci"
+    if args.humantargets and args.humanmappref:
+        human_depth = run_castanet(args.sample,args.outdir,args.trimmed,args.humantargets,args.threads,args.humanmappref)
+        depthdf = pd.read_csv(human_depth)
+        human = depthdf[depthdf["probetype"].str.contains("human")]
+        if "batch" in human.columns:
+            ind=["batch", "sampleid"]
+        else:
+            ind=["sampleid"]
+        if "n_reads_all" in human.columns:
+            allreads = "n_reads_all"
+        elif "reads_for_mapping" in human.columns:
+            allreads = "reads_for_mapping"
+        else:
+            sys.exit("Error: neither n_reads_all nor reads_for_mapping column found in castanet depth csv")
+        humanall = human.pivot(
+            index=ind,
+            columns="probetype",
+            values=allreads).fillna(0)
+        humanall["allhuman"] = humanall.sum(axis=1)
+        humanall.columns = [x + "_all" for x in humanall.columns]
+        humandedup = human.pivot(
+            index=ind,
+            columns="probetype",
+            values="n_reads_dedup").fillna(0)
+        humandedup["allhuman"] = humandedup.sum(axis=1)
+        humandedup.columns = [x + "_dedup" for x in humandedup.columns]
+        humannc2 = human.pivot(
+            index=ind,
+            columns="probetype",
+            values="prop_npos_cov2").fillna(0)
+        humannc2.columns = [x + "_nc2" for x in humannc2.columns]
+        humandedup.reset_index()
+        humannc2.reset_index()
+
+
+
+        allstats = pd.merge(humanall, humandedup, left_on=ind, right_on=ind)
+        allstats = pd.merge(allstats, humannc2, left_on=ind, right_on=ind)
+        outheaderls = [x for x in  allstats.columns if x not in ind]
+        outstr = allstats[outheaderls].iloc[0].tolist()
+        print("Human targets processed with castanet")
+        outstring += "," + ",".join([str(x) for x in outstr])
+        outheader += "," + ",".join([str(x) for x in outheaderls])
+
+        shutil.rmtree(args.outdir+"/"+args.sample)
+    elif args.humanmappref or args.humantargets:
+        sys.exit(f"human target castanet analysis requires --humanmappref and --humantargets inputs")
     if args.kraken:
         taxa =["Eukaryota","Bacteria","Archaea","Viruses","Fungi","Caudoviricetes","Homo sapiens"]
         outheader += "," + ",".join([f"kraken:{x}" for x in taxa])
@@ -469,10 +546,13 @@ def main():
             # os.remove(sortedbam)
             # os.remove(sortedbam + ".bai")
     if args.castanetdepth:
-        total_reads,dedup_reads = get_castanet_stats(args.castanetdepth)
-        outheader += ",castanet_total_mapped_reads,castanet_dedup_reads"
-        outstring += f",{total_reads},{dedup_reads}"
-        print("castanet results processed")
+        if os.path.exists(args.castanetdepth):
+            total_reads,dedup_reads = get_castanet_stats(args.castanetdepth)
+            outheader += ",castanet_total_mapped_reads,castanet_dedup_reads"
+            outstring += f",{total_reads},{dedup_reads}"
+            print("castanet results processed")
+        else:
+            print("WARNING: castanet depth file not found, skipping castanet summaries")
 
     outf.write(f"{outheader}\n")
     outf.write(f"{outstring}\n")
