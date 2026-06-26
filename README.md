@@ -46,6 +46,9 @@ python qcpipe_integrated.py --sample <SAMPLE_ID> --batch <BATCH_ID> --outdir <OU
 | `--bedfile` | `--bedfile` | Optional | BED file corresponding to --mttarget fasta file that contains enriched regions (select from enrichment_targets folder) |
 | `--castanetbam` | `--castanetbam` | Optional | Path to castanet BAM file.                                                                                             |
 | `--castanetdepth`| `--castanetdepth`| Optional | Path to castanet _depth.csv file.                                                                                      |
+| | `--humantargets` | Optional | FASTA reference stem/file for human targets included in the capture panel. Used to run the integrated Castanet human-target analysis. |
+| | `--humanmappref` | Optional | Castanet mapping reference table for the human targets. Required with `--humantargets`. |
+| | `--threads` | Optional | Number of threads to use for the integrated Castanet human-target analysis. Defaults to `1`. |
 | | `--keeptmp` | Optional Flag| Prevents cleanup deletion routines targeting intermediate alignments.                                                  |
 
 ---
@@ -77,6 +80,9 @@ python qcpipe_integrated.py \
   --kraken kraken2_report.txt \
   --castanetbam sample.bam \
   --castanetdepth sample_depth.csv \
+  --humantargets human_targets/reference_stem \
+  --humanmappref human_targets/mapping_reference.csv \
+  --threads 8 \
   --outdir ./qc_reports
   ```
   ---
@@ -140,3 +146,14 @@ The script generates a single comma-delimited output file (`[sample_id]_qc.csv`)
 | `filtered_mapped_insert[25/50/75]`| Float | Percentile metrics ($Q_1, Q_2, Q_3$) for filtered insert size.                              |
 | `castanet_total_mapped_reads`| Integer | Sum of all reads mapped to all targets from castanet depths file.                           |
 | `castanet_dedup_reads` | Integer | Sum of all deduplicated reads mapped to all targets from castanet depths file.              |
+
+### 5. Integrated Human-Target Castanet Metrics
+*Generated when supplying both `--humantargets` and `--humanmappref`. The script runs Castanet on the trimmed read folder, filters the Castanet depth table to rows whose `probetype` contains `human`, and emits columns dynamically from the probe names present in that file.*
+
+| CSV Header Pattern | Data Type | Description |
+| :--- | :---: |:---|
+| `<probetype>_all` | Integer/Float | Total mapped reads for each human `probetype`. Uses `n_reads_all` when present in the Castanet depth CSV, otherwise `reads_for_mapping`. |
+| `allhuman_all` | Integer/Float | Sum of the mapped-read counts across all human probe types. |
+| `<probetype>_dedup` | Integer/Float | Deduplicated mapped reads (`n_reads_dedup`) for each human `probetype`. |
+| `allhuman_dedup` | Integer/Float | Sum of deduplicated mapped reads across all human probe types. |
+| `<probetype>_nc2` | Float | `prop_npos_cov2` value for each human `probetype`, representing the proportion of target positions with coverage of at least 2. |

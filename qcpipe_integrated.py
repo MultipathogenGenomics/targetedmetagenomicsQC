@@ -76,47 +76,7 @@ def rundepth(bamfile,region,chroms):
 
     return results
 
-def runstats(bamfile, region=False, min_mapq=0, min_maplen=0):
 
-    filters = ["proper_pair"]
-
-    if min_mapq > 0:
-        filters.append(f"mapping_quality >= {min_mapq}")
-
-    if min_maplen > 0:
-        filters.append(f"sequence_length >= {min_maplen}")
-
-    filter_expr = " and ".join(filters)
-
-    sambamba_cmd = [
-        "sambamba",
-        "view",
-        "-f", "bam",
-        "-F", filter_expr
-    ]
-
-    if region:
-        sambamba_cmd += ["-L", region]
-
-    sambamba_cmd.append(bamfile)
-
-    view = subprocess.Popen(
-        sambamba_cmd,
-        stdout=subprocess.PIPE
-    )
-
-    result = subprocess.run(
-        ["samtools", "stats"],
-        stdin=view.stdout,
-        capture_output=True,
-        text=True
-    )
-
-    if result.returncode != 0:
-        print(f"Error running samtools stats: {result.stderr}")
-        sys.exit(1)
-
-    return result
 
 def get_inset_size(bamfile,enrichedregions,unenrichedregions,chroms):
     """samtools view -b your.bam chr1:100000-200000 | samtools sort - | samtools stats | grep ^IS"""
