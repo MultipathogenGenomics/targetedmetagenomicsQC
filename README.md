@@ -1,8 +1,7 @@
 # QC Pipeline (`qcpipe_integrated.py`)
 
 ## Summary
-
-`qcpipe_integrated.py` is an integrated quality control (QC) pipeline for targeted next-generation sequencing (tNGS) data. It performs end-to-end QC across FASTQ reads, BAM alignments, enrichment regions, insert size distributions, taxonomic classification, and optional Castanet outputs.
+`qcpipe_integrated.py` is an integrated quality control (QC) pipeline for targeted next-generation sequencing (tNGS) data. It performs end-to-end QC across FASTQ reads, BAM alignments, enrichment regions, insert size distributions, taxonomic classification, and optional [Castanet](https://github.com/MultipathogenGenomics/castanet) outputs.
 
 It generates a **single per-sample QC report (`*_qc.csv`)** and optional diagnostic plots.
 
@@ -13,18 +12,16 @@ It generates a **single per-sample QC report (`*_qc.csv`)** and optional diagnos
 - Insert size distribution analysis from BAM files
 - Enrichment analysis using BED-defined regions, usually in mitochondrial regions
 - Kraken2 taxonomic summarisation
-- Castanet BAM + depth integration
+- [Castanet](https://github.com/MultipathogenGenomics/castanet) BAM + depth integration
 - Insert size visualisation plots
 
 ---
 
 ## Dependencies
 
-The runtime environment must contain the following command-line tools and software utilities within its execution `$PATH`:
-
-* **`bwa-mem2`**: High-performance alignment framework.
-* **`samtools` ($\\ge$ v1.10)**: Stream processing engine for SAM/BAM operations (`sort`, `index`, `depth`, `view`).
-* **`seqkit`**: Fast sequential processing of nucleotide records.
+* **`bwa-mem2`**
+* **`samtools` ($\\ge$ v1.10)**
+* **`seqkit`**
 * ** Python 3.x Environment**: Requires `pandas`, `numpy`, and `matplotlib`.
 
 ---
