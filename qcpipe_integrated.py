@@ -2,13 +2,90 @@ import shutil
 import sys
 import statistics
 import os
+import fcntl
+import csv
 from glob import glob
 import subprocess
 import pandas as pd
 import numpy as np
 import tempfile
 from matplotlib import pyplot as plt
+import pysam
 from time import sleep as sl
+
+KRAKEN_TAXA = [
+    "Eukaryota", "Bacteria", "Archaea", "Viruses", "Fungi",
+    "Caudoviricetes", "Homo sapiens",
+]
+
+# Columns whose names do not depend on the contents of an input file.  Keep this
+# list as the stable prefix of every report so reports from partial analyses can
+# be concatenated directly.
+QC_COLUMNS = [
+    "batch", "sampleid", "R1", "R2", "trimmedR1", "trimmedR2",
+    "rawreads", "trimmedreads", "avglen", "medlen", "r1count",
+    "r2count", "r1avglen", "r1medlen", "r2avglen", "r2medlen",
+    "enrichmentloci_avginsert", "enrichmentloci_stdinsert",
+    "enrichmentloci_insert25", "enrichmentloci_insert50",
+    "enrichmentloci_insert75", "enrichedMedian", "unenrichedMedian",
+    "enrichmentRatio", "enrichmentloci",
+    *[f"kraken:{taxon}" for taxon in KRAKEN_TAXA],
+    "all_mapped_avginsert", "all_mapped_stdinsert", "all_mapped_insert25",
+    "all_mapped_insert50", "all_mapped_insert75",
+    "filtered_mapped_avginsert", "filtered_mapped_stdinsert",
+    "filtered_mapped_insert25", "filtered_mapped_insert50",
+    "filtered_mapped_insert75", "castanet_total_mapped_reads",
+    "castanet_dedup_reads",
+]
+
+
+def normalize_qc_outputs(outdir, new_report=None):
+    """Give every per-sample report in *outdir* the same union schema.
+
+    Human probe columns are data-dependent, so their complete set cannot be
+    known before reports are produced.  Under a lock, take their union across
+    the output directory and reindex every report.  This also makes concurrent
+    sample jobs converge on one mergeable schema.
+    """
+    lock_path = os.path.join(outdir, ".qc_schema.lock")
+    with open(lock_path, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        if new_report is not None:
+            outfile, outheader, outstring = new_report
+            with tempfile.NamedTemporaryFile(
+                mode="w", dir=outdir, delete=False
+            ) as output_file:
+                output_file.write(f"{outheader}\n")
+                output_file.write(f"{outstring}\n")
+                temp_output = output_file.name
+            os.replace(temp_output, outfile)
+        report_paths = sorted(glob(os.path.join(outdir, "*_qc.csv")))
+        reports = {}
+        fieldnames = {}
+        for path in report_paths:
+            with open(path, newline="") as report_file:
+                reader = csv.DictReader(report_file)
+                fieldnames[path] = reader.fieldnames or []
+                reports[path] = list(reader)
+        extra_columns = sorted({
+            column
+            for columns in fieldnames.values()
+            for column in columns
+            if column not in QC_COLUMNS
+        })
+        full_columns = QC_COLUMNS + extra_columns
+        for path, rows in reports.items():
+            with tempfile.NamedTemporaryFile(
+                mode="w", newline="", dir=outdir, delete=False
+            ) as output_file:
+                writer = csv.DictWriter(
+                    output_file, fieldnames=full_columns, lineterminator="\n"
+                )
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow({column: row.get(column, "NA") for column in full_columns})
+                temp_path = output_file.name
+            os.replace(temp_path, path)
 """
 reqs:
 samtools
@@ -40,7 +117,7 @@ def rundepth(bamfile,region,chroms):
                 sys.exit(1)
 
         view = subprocess.Popen(
-            ["samtools", "view", "-b", "-f", "0x2", sorted_bam, chrom],
+            ["samtools", "view", "-b", sorted_bam, chrom],
             stdout=subprocess.PIPE
         )
         depth_proc = subprocess.Popen(
@@ -81,7 +158,7 @@ def rundepth(bamfile,region,chroms):
 def get_inset_size(bamfile,enrichedregions,unenrichedregions,chroms):
     """samtools view -b your.bam chr1:100000-200000 | samtools sort - | samtools stats | grep ^IS"""
 
-    sizes,unfilteredsizes = get_fragment_sizes(bamfile)
+    sizes, unfilteredsizes = get_fragment_sizes(bamfile)
     enrichedresults =  rundepth(bamfile,enrichedregions,chroms)
     unenrichedresults  = rundepth(bamfile, unenrichedregions,chroms)
 
@@ -121,32 +198,81 @@ def read_lengths(fq_file):
     return lengths
 def get_fragment_sizes(bamfile):
 
-    cmd = [
-        "samtools", "view",
-        "-f", "0x2",
-        "-F", "0x900",
-        bamfile
-    ]
-
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
-
     sizes = []
     unfiltered = []
+    bam = pysam.AlignmentFile(bamfile, "rb")
+    for read in bam:
+        # --- basic pairing sanity ---
+        if not read.is_paired:
+            continue
+        if read.is_unmapped or read.mate_is_unmapped:
+            continue
 
-    for line in proc.stdout:
+        # --- orientation filter (ignore BWA 0x2 entirely) ---
+        if read.is_reverse == read.mate_is_reverse:
+            continue
 
-        parts = line.split("\t")
+        # --- mapping quality filter ---
+        mapq = read.mapping_quality
+        tlen = abs(read.template_length)
+        if mapq <= 20:
+            unfiltered.append(tlen)
+            continue
 
-        tlen = abs(int(parts[8]))
-        mapq = int(parts[4])
-        seqlen = len(parts[9])
+        # --- sequence length filter ---
+        seqlen = read.query_length
+        if seqlen is None or seqlen <= 50:
+            unfiltered.append(tlen)
+            continue
 
+        # --- insert size filter ---
+
+        if tlen <= 50:
+            unfiltered.append(tlen)
+            continue
+
+        sizes.append(tlen)
         unfiltered.append(tlen)
 
-        if mapq > 20 and seqlen > 50 and tlen > 50:
-            sizes.append(tlen)
 
-    return sizes, unfiltered
+    # cmd = [
+    #     "samtools", "view",
+    #     "-f", "0x2",
+    #     "-F", "0x900",
+    #     bamfile
+    # ]
+    #
+    # cmd = [
+    #     "samtools", "view",
+    #     "-F", "0x900",
+    #     bamfile
+    # ]
+    #
+    # # print(" ".join(cmd))
+    # proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
+    #
+    # sizes = []
+    # unfiltered = []
+    #
+    # for line in proc.stdout:
+    #
+    #     parts = line.split("\t")
+    #
+    #     tlen = abs(int(parts[8]))
+    #     mapq = int(parts[4])
+    #     seqlen = len(parts[9])
+    #
+    #     unfiltered.append(tlen)
+    #
+    #     if mapq > 20 and seqlen > 50 and tlen > 50:
+    #         sizes.append(tlen)
+    #
+    # if len(sizes) == 0:
+    #     for line in proc.stderr:
+    #         print(line)
+    #
+
+    return sizes,unfiltered
 
 def read_lengths_stream(fq_file):
 
@@ -344,7 +470,6 @@ def main():
     if not os.path.exists(args.outdir):
         os.mkdir(args.outdir)
     outfile = args.outdir + "/" + args.sample + "_qc.csv"
-    outf = open(outfile, "w")
     outstring = f"{args.batch},{args.sample}"
     outheader = f"batch,sampleid"
 
@@ -374,7 +499,7 @@ def main():
 
 
     if args.trimmed[0] != "NA" and args.mttarget and args.bedfile:
-        if not os.path.exists(args.mttarget) or not os.path.exists(args.bedfile):
+        if (not os.path.exists(args.mttarget)) or (not os.path.exists(args.bedfile)):
             sys.exit("Please provide either args.bedfile and args.mttarget to perform enrichment analysis")
         mtbam = args.outdir + "/" + args.sample + ".mt_bwa.bam"
         run_bwa_mt(args.trimmed[0],args.trimmed[1],args.mttarget,args.outdir+"/"+args.sample+".mt_bwa.bam")
@@ -385,7 +510,7 @@ def main():
         # enrichstats,sizes = get_inset_size(mtbam,enrichedbed,unenrichedbed,chroms)
         # get_fragment_sizes(mtbam)
         mean_ins,stdev_ins, mtquartiles  =  insertSizeStats(sizes)
-        mean_ins_uf,stdev_ins_uf, quartiles_uf = insertSizeStats(unfilteredsizes)
+        # mean_ins_uf,stdev_ins_uf, quartiles_uf = insertSizeStats(unfilteredsizes)
         title = f"{args.sample} COX1 insert size distribution" if args.sample else "Insert size distribution"
         outname = f"{args.sample}_COX1_insert_size_distribution.png" if args.sample else "insert_size_distribution.png"
         outpath = os.path.join(args.outdir, outname) if args.outdir else outname
@@ -413,8 +538,8 @@ def main():
     elif args.mttarget and args.trimmed[0] == "NA":
         sys.exit("to run enrichment please provide trimmed reads with --trimmed flag")
     else:
-        outstring += f",NA,NA,NA,NA"
-        outheader += f",enrichedMedian,unenrichedMedian,enrichmentRatio,enrichmentloci"
+        outstring += f",NA,NA,NA,NA,NA,NA,NA,NA,NA"
+        outheader += f",enrichmentloci_avginsert,enrichmentloci_stdinsert,enrichmentloci_insert25,enrichmentloci_insert50,enrichmentloci_insert75,enrichedMedian,unenrichedMedian,enrichmentRatio,enrichmentloci"
     if args.humantargets and args.humanmappref:
         human_depth = run_castanet(args.sample,args.outdir,args.trimmed,args.humantargets,args.threads,args.humanmappref)
         depthdf = pd.read_csv(human_depth)
@@ -462,17 +587,20 @@ def main():
         shutil.rmtree(args.outdir+"/"+args.sample)
     elif args.humanmappref or args.humantargets:
         sys.exit(f"human target castanet analysis requires --humanmappref and --humantargets inputs")
+    outheader += "," + ",".join([f"kraken:{x}" for x in KRAKEN_TAXA])
     if args.kraken:
-        taxa =["Eukaryota","Bacteria","Archaea","Viruses","Fungi","Caudoviricetes","Homo sapiens"]
-        outheader += "," + ",".join([f"kraken:{x}" for x in taxa])
         if os.path.exists(args.kraken):
-            krakencounts,total_reads = summarize_kraken_kingdoms(args.kraken,taxa)
-            krakenres = ",".join([krakencounts[x][0] for x in taxa])
+            krakencounts,total_reads = summarize_kraken_kingdoms(args.kraken,KRAKEN_TAXA)
+            krakenres = ",".join([krakencounts[x][0] for x in KRAKEN_TAXA])
             outstring += f",{krakenres}"
         else:
-            krakenres = ",".join(["NA" for x in taxa])
+            krakenres = ",".join(["NA" for x in KRAKEN_TAXA])
             outstring += f",{krakenres}"
         print("kraken results processed")
+    else:
+        outstring += "," + ",".join(["NA" for _ in KRAKEN_TAXA])
+
+    outheader += ",all_mapped_avginsert,all_mapped_stdinsert,all_mapped_insert25,all_mapped_insert50,all_mapped_insert75,filtered_mapped_avginsert,filtered_mapped_stdinsert,filtered_mapped_insert25,filtered_mapped_insert50,filtered_mapped_insert75"
     if args.castanetbam:
 
         if len(args.castanetbam) == 0:
@@ -487,11 +615,9 @@ def main():
             outpath = os.path.join(args.outdir, outname) if args.outdir else outname
 
             insert_size_plot(sizes, title, outpath,unfilteredsizes=unfilteredsizes)
-            outheader += ",all_mapped_avginsert,all_mapped_stdinsert,all_mapped_insert25,all_mapped_insert50,all_mapped_insert75,filtered_mapped_avginsert,filtered_mapped_stdinsert,filtered_mapped_insert25,filtered_mapped_insert50,filtered_mapped_insert75"
             outstring += f",{mean_valuf},{stdev_uf},{quartilesuf[0]},{quartilesuf[1]},{quartilesuf[2]},{mean_val},{stdev_val},{quartiles[0]},{quartiles[1]},{quartiles[2]}"
 
         else:
-            outheader += ",all_mapped__avginsert,all_mapped__stdinsert,all_mapped__insert25,all_mapped__insert50,all_mapped__insert75,filtered_mapped__avginsert,filtered_mapped__stdinsert,filtered_mapped__insert25,filtered_mapped__insert50,filtered_mapped__insert75"
             outstring += f",NA,NA,NA,NA,NA,NA,NA,NA,NA,NA"
 
         ## get total mapped and total dedup reads from castanet
@@ -505,18 +631,22 @@ def main():
             os.remove(mtbam.replace(".bam", ".sorted.bam.bai"))
             # os.remove(sortedbam)
             # os.remove(sortedbam + ".bai")
+    else:
+        outstring += f",NA,NA,NA,NA,NA,NA,NA,NA,NA,NA"
+
+    outheader += ",castanet_total_mapped_reads,castanet_dedup_reads"
     if args.castanetdepth:
         if os.path.exists(args.castanetdepth):
             total_reads,dedup_reads = get_castanet_stats(args.castanetdepth)
-            outheader += ",castanet_total_mapped_reads,castanet_dedup_reads"
             outstring += f",{total_reads},{dedup_reads}"
             print("castanet results processed")
         else:
-            print("WARNING: castanet depth file not found, skipping castanet summaries")
+            print("WARNING: castanet depth file not found; writing NA castanet summaries")
+            outstring += ",NA,NA"
+    else:
+        outstring += ",NA,NA"
 
-    outf.write(f"{outheader}\n")
-    outf.write(f"{outstring}\n")
-    outf.close()
+    normalize_qc_outputs(args.outdir, (outfile, outheader, outstring))
 
 if __name__ == "__main__":
     main()

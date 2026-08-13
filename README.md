@@ -89,7 +89,7 @@ python qcpipe_integrated.py \
 
 ## Output Statistics Reference Guide
 
-The script generates a single comma-delimited output file (`[sample_id]_qc.csv`) containing headers mapped dynamically based on input flags. The full data schema is broken down below:
+The script generates a single comma-delimited output file (`[sample_id]_qc.csv`). Every report in an output directory is normalized to the same full schema, regardless of which analyses were requested; metrics for analyses that were not run are written as `NA`. Human-target probe columns are data-dependent, so the pipeline takes their union across all `*_qc.csv` reports in the output directory and adds any missing probe columns to the other reports. The files can therefore be concatenated or merged directly by `sampleid`.
 
 ### 1. Base Sample & Sequencing Statistics
 | CSV Header Block | Data Type | Description                                                                       |
